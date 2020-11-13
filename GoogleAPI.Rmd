@@ -1,0 +1,260 @@
+---
+title: "Google API"
+author: "Joe Jenkins"
+date: "9/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Packages:
+
+```{r}
+library(httr)
+library(dplyr)
+library(stringr)
+library(DT)
+library(leaflet)
+library(ggplot2)
+```
+
+### Data Load and Google API: 
+
+First, I loaded the data, my google key, and the baseline url for the Google geocode api. Also, I cleaned the data, put it in the correct format, and created links in the dataframe to search.
+
+```{r}
+locations <- read.csv("stJoeLand.csv", stringsAsFactors = FALSE)
+locations <- locations %>% 
+  mutate(ID = rownames(locations)) 
+google_Key <- "Enter Google Key"
+baseurl <- "https://maps.googleapis.com/maps/api/geocode/json?address="
+locations <- locations %>% 
+  mutate(address = gsub("[ ]{2,}", " ", address),
+         city =gsub("[ ]{2,}", " ", city),
+         state = gsub("[ ]{2,}", " ", state),
+         ZIP_code = gsub("[ ]{2,}", " ", ZIP_code)) %>% 
+  mutate(address_g = gsub(" ", "%20", address),
+         city_g = gsub(" ", "%20", city),
+         search_g = paste(baseurl, address_g, "%20",city_g, "%20", state, "&key=", google_Key, sep = ""))
+```
+
+### Function to Get Coordinates:
+
+After this, I created a function to obtain the coordiantes and only took the necessary results from the search. 
+
+```{r}
+get_addresses <- function(search) {
+  out <- tryCatch(
+    {
+      Sys.sleep(1)
+      initial_result <- GET(search)
+      info <- jsonlite::fromJSON(content(initial_result, as = "text"))[[1]]
+      final <- data.frame(Full_Address = info$formatted_address,
+                          Latitude = info$geometry$location$lat,
+                          Longitude = info$geometry$location$lng)
+    }, error = function(e) {
+      search
+    }
+  )
+  return(out)
+}
+```
+
+### Applying the Function and Merging the Data:
+
+I used lapply on the function I created to get all 250 address coordinates. After, getting the results, I binded the rows to create one dataframe. In addition, I added row ID numbers so I could easily join it with the original data. 
+
+```{r}
+result <- lapply(locations$search_g, get_addresses)
+result2 <- bind_rows(result)
+result2 <- result2 %>% 
+  mutate(ID = rownames(.)) 
+full_data <- merge(locations, result2, by = "ID", all = TRUE)
+```
+
+### Data Tables:
+
+Below, I printed the data tables with only the coordiantes and the data tables with teh full information as well a the coordinates. 
+
+#### Address and Coordinates Only: 
+
+```{r}
+DT::datatable(result2)
+```
+
+#### Full Information: 
+
+```{r}
+DT::datatable(full_data)
+```
+
+### Map
+
+First, I created color bins based on the sales price. 
+
+```{r}
+quantileNum <- 5
+probs <- seq(0, 1, length.out = quantileNum + 1)
+bins <- quantile(full_data$sale_price, probs, na.rm = TRUE, names = FALSE)
+while (length(unique(bins)) != length(bins)) {
+  quantileNum <- quantileNum - 1
+  probs <- seq(0, 1, length.out = quantileNum + 1)
+  bins <- quantile(full_data$sale_price, probs, na.rm = TRUE, names = FALSE)
+}
+
+pal <- colorBin("YlGn", bins = bins)
+```
+
+Next, I created a map that has a markers for the addresses with various informaion regarding the property. In addition, I created circles that are shaded based on the sales price. 
+
+```{r}
+map <- leaflet(full_data) %>% 
+  setView(lng = -86.2520, lat = 41.6764, zoom = 10) %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  addMarkers(lng=~Longitude, lat=~Latitude,
+             popup = paste("Address: ",
+                           full_data$Full_Address,
+                           "<br> Latitude: ",
+                           full_data$Latitude, 
+                           "<br> Longitude: ",
+                           full_data$Longitude,
+                           "<br> Price: $",
+                           full_data$sale_price,
+                           "<br> School District: ",
+                           full_data$school_district, 
+                           "<br> Acreage: ",
+                           full_data$acreage, 
+                           "<br> Year Built: ",
+                           full_data$year_built, 
+                           "<br> Floors: ",
+                           full_data$floors, 
+                           "<br> Bedrooms: ",
+                           full_data$bedrooms, 
+                           "<br> Bathrooms: ",
+                           full_data$bathrooms,
+                           sep = "")) %>% 
+  addCircles(lng=~Longitude, lat=~Latitude,
+            weight = 15,
+            fillOpacity = 5,
+            color = pal(full_data$sale_price),
+            radius = 100) %>% 
+  addLegend("bottomright", pal = pal, title = "Sale Price", values = full_data$sale_price)
+map
+```
+
+I think the biggest thing to be learned from this map is that the majority of higher priced homes are north of South Bend and appear to be in Granger. In addition, the higher priced homes appear to typically have more than three floors and over four bedrooms. Meanwhile, there appears to be a collection of lower priced homes just south of the St. Joseph River. In addition, the houses appear to be one to two bedrooms and on oen or two floors. 
+
+### Nearest Hospital
+
+For the hospital, I chose Memorial Hospital. The address for the hospital and St. Joseph County Sheriff's office are the following:
+
+  - Memorial Hospital: 615 North Michigan Street South Bend, IN 46601
+  
+  - St. Joseph County Sheriff's office: 401 W Sample Street South Bend, IN 46601
+
+#### Constructing the Search
+```{r}
+basemapurl <- "https://maps.googleapis.com/maps/api/directions/json?origin="
+
+hospital <- gsub(" ", "%20", "615 North Michigan Street South Bend IN 46601")
+sheriff <- gsub(" ", "%20", "401 W Sample Street South Bend IN 46601")
+full_data <- full_data %>% 
+  mutate(hospital_search = paste(basemapurl, 
+                                 address_g, 
+                                 "%20", 
+                                 city_g, 
+                                 "%20", 
+                                 state, 
+                                 "&destination=",
+                                 hospital, 
+                                 "&key=", 
+                                 google_Key,
+                                 sep = ""),
+         sheriff_search = paste(basemapurl, 
+                                address_g, 
+                                "%20", 
+                                city_g, 
+                                "%20", 
+                                state, 
+                                "&destination=",
+                                sheriff, 
+                                "&key=", 
+                                google_Key,
+                                sep = ""))
+```
+
+#### Function to Get the Distances
+
+```{r}
+get_distances <- function(search1, search2) {
+  out <- tryCatch(
+    {
+      Sys.sleep(1)
+      initial_result <- GET(search1)
+      info <- jsonlite::fromJSON(content(initial_result, as = "text"))
+      distance_h <- info[["routes"]][["legs"]][[1]][["distance"]][["text"]]
+      Sys.sleep(.5)
+      initial_result2 <- GET(search2)
+      info2 <- jsonlite::fromJSON(content(initial_result2, as = "text"))
+      distance_s <- info2[["routes"]][["legs"]][[1]][["distance"]][["text"]]
+      
+      final <- data.frame(Hospital_Distance = as.character(distance_h),
+                          Sheriff_Distance = as.character(distance_s))
+      scraperesult <- list(final)
+      return(scraperesult)
+    }, error = function(e) {
+      search
+    }
+  )
+  return(out)
+}
+```
+
+#### Applying the Function and Data Wrangling
+
+```{r}
+result_d <- mapply(get_distances, full_data$hospital_search, full_data$sheriff_search)
+result_d2 <- bind_rows(result_d)
+result_d2 <- result_d2 %>% 
+  mutate(ID = rownames(.),
+         Hospital_Distance_Num = as.numeric(str_replace(as.character(Hospital_Distance), " mi", "")),
+         Sheriff_Distance_Num = as.numeric(str_replace(as.character(Sheriff_Distance), " mi", ""))) 
+full_data <- merge(full_data, result_d2, by = "ID", all = FALSE) %>% 
+  select(-ID, -address_g, -city_g, -search_g, -hospital_search, -sheriff_search)
+```
+
+#### Full Data
+
+```{r}
+DT::datatable(full_data)
+```
+
+#### Hospital's Imapct on the Sale's Price
+
+```{r}
+hospital <- lm(sale_price ~ Hospital_Distance_Num, data = full_data)
+summary(hospital)
+```
+
+```{r}
+ggplot(full_data, aes(x = Hospital_Distance_Num, y = sale_price)) + 
+  geom_point() + theme_classic() + ggtitle("Sale Price vs. Distance to Hospital") + geom_smooth(method = "lm")
+```
+
+On first glance, it does appear that the distance to the hospital does slightly increase the value of the property. When inspecting the model closer, it has an adjusted R-squared value that is negative, which means that the model does not do a good job predicting the sales price. This makes sense when you think about it becasue there are a lot of factors that impact the sales price. In addition, this model does not take into account that the area's surrounding the hospiatl might be closer to South Bend, have better schools, more valuable land, and thus demand a higher sales price.
+
+#### Sheriff's Office Impact on the Sale's Price
+
+```{r}
+sheriff <- lm(sale_price ~ Sheriff_Distance_Num, data = full_data)
+summary(sheriff)
+```
+
+```{r}
+ggplot(full_data, aes(x = Sheriff_Distance_Num, y = sale_price)) + 
+  geom_point() + theme_classic() + ggtitle("Sale Price vs. Distance to Sheriff's Office") + geom_smooth(method = "lm")
+```
+
+Similar to the model on distance to a hospital, the sheriffs department model initially appears to indicate that the price of a home can be explained by the distance to the sheriffs office. However, upon further inspection, this fails to hold up because the model has a negative Adjusted R-squared value. 
